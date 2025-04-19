@@ -29,7 +29,7 @@ from scipy import signal
 from qosst_core.utils import QOSSTPath
 from qosst_core.configuration import Configuration
 from qosst_core.modulation.modulation import Modulation
-from qosst_core.comm.zc import zcsequence
+from qosst_core.synchronization.synchronization import SynchronizationSequence
 from qosst_core.comm.filters import root_raised_cosine_filter, rect_filter
 from qosst_core.configuration.exceptions import InvalidConfiguration
 
@@ -65,10 +65,12 @@ def dsp_alice(config: Configuration) -> Tuple[np.ndarray, np.ndarray, np.ndarray
         frequency_shift=config.frame.quantum.frequency_shift,
         pilots_amplitudes=config.frame.pilots.amplitudes,
         pilots_frequencies=config.frame.pilots.frequencies,
-        zc_length=config.frame.zadoff_chu.length,
-        zc_root=config.frame.zadoff_chu.root,
-        zc_rate=config.frame.zadoff_chu.rate,
-        zc_amplitude=config.frame.zadoff_chu.amplitude,
+        synchro_cls=config.frame.synchronization.synchronization_cls,
+        synchro_rate=config.frame.synchronization.rate,
+        synchro_amplitude=config.frame.synchronization.amplitude,
+        zc_length=config.frame.synchronization.zc_length,
+        zc_root=config.frame.synchronization.zc_root,
+        mls_nbits=config.frame.synchronization.mls_nbits,
         num_zeros_start=config.frame.num_zeros_start,
         num_zeros_end=config.frame.num_zeros_end,
         dac_rate=config.alice.dac.rate,
@@ -95,9 +97,12 @@ def dsp_alice_params(
     frequency_shift: float,
     pilots_amplitudes: np.ndarray,
     pilots_frequencies: np.ndarray,
-    zc_length: int,
+    synchro_amplitude: float,
+    synchro_rate: float,
+    synchro_cls: Type[SynchronizationSequence],
     zc_root: int,
-    zc_rate: float,
+    zc_length: int,
+    mls_nbits: int,
     num_zeros_start: int,
     num_zeros_end: int,
     dac_rate: float,
@@ -110,7 +115,6 @@ def dsp_alice_params(
     load_symbols: bool = False,
     save_symbols: bool = False,
     symbols_path: QOSSTPath = "",
-    zc_amplitude: float = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Use the DSP of Alice to generate the sequence to the DAC using parameters.
 
@@ -124,9 +128,12 @@ def dsp_alice_params(
         frequency_shift (float): frequency shift of the quantum symbols.
         pilots_amplitudes (np.ndarray): list of the amplitudes of the pilots.
         pilots_frequencies (np.ndarray): list of the frequencies of the pilots.
+        synchro_amplitude (float): amplitude of the synchronization sequence.
+        synchro_rate (float): rate of the synchronization sequence. Must be less than the DAC rate. If 0 is given, the DAC rate is used.
+        synchro_cls (Type[SynchronizationSequence]): class used to generate the synchronization sequence.
         zc_length (int): length of the Zadoff-Chu sequence. Must be coprime with the root.
         zc_root (int): root of the Zadoff-Chu sequence. Must be coprime with the length.
-        zc_rate (float): rate of the Zadoff-Chu sequence. Must be less than the DAC rate. If 0 is given, the DAC rate is used.
+        mls_nbits (int): number of bits of the Maximum Length Sequence.
         num_zeros_start (int): number of zeros to pad before the Zadoff-Chu sequence.
         num_zeros_end (int): number of zeros to pad after the end of the quantum sequence.
         dac_rate (float): dac rate.
@@ -223,17 +230,23 @@ def dsp_alice_params(
 
     # Normalize sequence
 
-    # Add Zadoff-Chu sequence
-    if zc_rate == 0:
+    # Create the synchronization sequence object
+    synchro_obj = synchro_cls(
+        root=zc_root,
+        length=zc_length,
+        nbits=mls_nbits,
+        )
+
+    # Add synchronization sequence
+    if synchro_rate == 0:
         repeat = 1
     else:
-        repeat = int(dac_rate / zc_rate)
-    sequence = add_zc(
+        repeat = int(dac_rate / synchro_rate)
+    sequence = add_synchro(
         sequence,
-        zc_root,
-        zc_length,
+        synchro_obj,
         repeat=repeat,
-        amplitude=zc_amplitude,
+        amplitude=synchro_amplitude,
     )
 
     # Pad zeros
@@ -432,26 +445,25 @@ def add_frequency_multiplexed_pilots(
     return sequence + pilot_sequence
 
 
-def add_zc(sequence: np.ndarray, root: int, length: int, repeat: int = 1, amplitude: float = 1) -> np.ndarray:
+def add_synchro(sequence: np.ndarray, synchro_obj: SynchronizationSequence, repeat: int = 1, amplitude: float = 1) -> np.ndarray:
     """
-    Add Zadoff-Chu sequence at the beginning of the sequence.
+    Add synchronization sequence at the beginning of the sequence.
 
     Args:
-        sequence (np.ndarray): sequence to which add the Zadoff-Chu sequence to.
-        root (int): root of the Zadoff-Chu sequence.
-        length (int): length of the Zadoff-Chu sequence.
+        sequence (np.ndarray): sequence to which add the synchronization sequence to.
+        synchro_obj (SynchronizationSequence): instance of the class that generates the synchronization sequence.
         repeat (int, optional): repeat each element by this amount, useful to change the rate. Defaults to 1.
-        amplitude (float, optional): amplitude of the Zadoff-Chu sequence. Defaults to 1.
+        amplitude (float, optional): amplitude of the synchronization sequence. Defaults to 1.
 
     Returns:
-        np.ndarray: sequence with the Zadoff-Chu sequence added.
+        np.ndarray: sequence with the synchronization sequence added.
     """
-    logger.info("Adding Zadoff-Chu with length %i, root %i and amplitude %f", length, root, amplitude)
-    zadoff_chu = amplitude * zcsequence(root, length)
+    logger.info("Adding %s with amplitude %f", str(synchro_obj), amplitude)
+    synchro = amplitude * synchro_obj.sequence()
     if repeat > 1:
-        logger.info("Repeating Zadoff-Chu with repeat=%i", repeat)
-        zadoff_chu = np.repeat(zadoff_chu, repeat)
-    return np.concatenate((zadoff_chu, sequence))
+        logger.info("Repeating synchronization sequence with repeat=%i", repeat)
+        synchro = np.repeat(synchro, repeat)
+    return np.concatenate((synchro, sequence))
 
 
 def add_zeros(
